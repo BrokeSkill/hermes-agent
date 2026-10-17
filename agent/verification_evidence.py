@@ -239,14 +239,44 @@ def _canonical_tokens(canonical: str) -> list[str]:
         return []
 
 
+_STATUS_PRESERVING_WRAPPERS = {"timeout", "nice", "nohup", "stdbuf"}
+
+
 def _strip_command_prefix(tokens: list[str]) -> list[str]:
-    """Remove harmless command prefixes (env, VAR=x, command/time/noglob)."""
+    """Remove harmless command prefixes: env assignments, command/time/noglob, and
+    status-preserving wrappers with their flags and duration/niceness arguments."""
     i = 1 if tokens and tokens[0] == "env" else 0
     while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
         i += 1
-    while i < len(tokens) and tokens[i] in {"command", "time", "noglob"}:
-        i += 1
+    while i < len(tokens):
+        if tokens[i] in {"command", "time", "noglob"}:
+            i += 1
+        elif tokens[i] in _STATUS_PRESERVING_WRAPPERS:
+            i += 1
+            while i < len(tokens) and (tokens[i].startswith("-") or tokens[i].isdigit()):
+                i += 1
+        else:
+            break
     return list(tokens[i:])
+
+
+def _interpreter_family(token: str) -> Optional[str]:
+    """Family name for an interpreter token wherever it lives, else ``None``.
+
+    ``./venv/bin/python3.12``, ``python3`` and ``/usr/bin/python`` are all ``python``:
+    the detected command is ``pytest`` and the agent runs it through a venv interpreter.
+    """
+    name = token.replace("\\", "/").rsplit("/", 1)[-1]
+    name = _WINDOWS_EXE_SUFFIX_RE.sub("", re.sub(r"^(?:\./)+", "", name))
+    if not _INTERPRETER_NAME_RE.match(name):
+        return None
+    family = re.sub(r"[0-9.]+$", "", name)
+    return "python" if family == "py" else family
+
+
+def _normalize_tokens(tokens: list[str]) -> list[str]:
+    """Comparison form: no leading ``./``, every interpreter path collapsed to its family."""
+    return [_interpreter_family(t) or re.sub(r"^(?:\./)+", "", t) for t in tokens]
 
 
 def _equivalent_needles(needle: list[str]) -> list[list[str]]:
@@ -269,8 +299,9 @@ def _find_canonical_match(command: str, canonical_commands: list[str], exit_code
         if not needle:
             continue
         for index, segment in enumerate(segments):
-            candidate_tokens = _strip_command_prefix(segment.tokens)
+            candidate_tokens = _normalize_tokens(_strip_command_prefix(segment.tokens))
             for candidate in _equivalent_needles(needle):
+                candidate = _normalize_tokens(candidate)
                 if candidate_tokens[:len(candidate)] == candidate and _exit_status_is_attributable(segments, index, exit_code):
                     return canonical, candidate_tokens[len(candidate):]
     return None
